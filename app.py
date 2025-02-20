@@ -1,51 +1,58 @@
 import streamlit as st
-from langchain.embeddings import GoogleGenerativeAIEmbeddings
-from langchain.vectorstores import FAISS
-from langchain.llms import GoogleGenerativeAI
-from langchain.chains import RetrievalQA
-from langchain.document_loaders import TextLoader, PyPDFLoader, Docx2txtLoader
-from langchain.text_splitter import CharacterTextSplitter
+from PIL import Image
 import os
+from langchain.document_loaders import TextLoader, UnstructuredFileLoader
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.vectorstores import FAISS
+from langchain.chains import RetrievalQA
+from langchain.llms import HuggingFacePipeline
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
-# Set up API keys (replace with your actual API key)
-os.environ["GOOGLE_API_KEY"] = "your_google_api_key"
+# Streamlit UI
+st.title("Multimodal RAG with Qwen and FAISS")
+st.write("Upload documents and images for multimodal retrieval and generation.")
 
-# Initialize embeddings model
-embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+# File uploaders
+uploaded_files = st.file_uploader("Upload documents (PDF, TXT, etc.)", type=["txt", "pdf"], accept_multiple_files=True)
+uploaded_images = st.file_uploader("Upload images (JPG, PNG, etc.)", type=["jpg", "png"], accept_multiple_files=True)
+query = st.text_input("Enter your query:")
 
-# Load documents from multiple formats
-def load_documents():
+# Process files and images
+if uploaded_files or uploaded_images:
+    # Load documents
     documents = []
-    txt_loader = TextLoader("data.txt")
-    pdf_loader = PyPDFLoader("data.pdf")
-    docx_loader = Docx2txtLoader("data.docx")
-    documents.extend(txt_loader.load())
-    documents.extend(pdf_loader.load())
-    documents.extend(docx_loader.load())
-    return documents
+    for uploaded_file in uploaded_files:
+        file_path = os.path.join("/tmp", uploaded_file.name)
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        if uploaded_file.name.endswith(".txt"):
+            loader = TextLoader(file_path)
+        else:
+            loader = UnstructuredFileLoader(file_path)
+        documents.extend(loader.load())
 
-documents = load_documents()
+    # Load images (for now, we'll just save them; you can add image processing later)
+    image_paths = []
+    for uploaded_image in uploaded_images:
+        image_path = os.path.join("/tmp", uploaded_image.name)
+        with open(image_path, "wb") as f:
+            f.write(uploaded_image.getbuffer())
+        image_paths.append(image_path)
 
-# Split text into chunks
-text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-texts = text_splitter.split_documents(documents)
+    # Initialize embeddings and vector store
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    vector_store = FAISS.from_documents(documents, embeddings)
 
-# Create FAISS vector store
-vector_store = FAISS.from_documents(texts, embeddings)
-retriever = vector_store.as_retriever()
+    # Initialize Qwen LLM
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen-7B-Instruct")
+    model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen-7B-Instruct")
+    pipe = pipeline("text-generation", model=model, tokenizer=tokenizer, max_length=512)
+    llm = HuggingFacePipeline(pipeline=pipe)
 
-# Initialize Gemini LLM
-llm = GoogleGenerativeAI(model="gemini-pro")
+    # Create RetrievalQA chain
+    qa_chain = RetrievalQA.from_chain_type(llm=llm, chain_type="stuff", retriever=vector_store.as_retriever())
 
-# Create RAG pipeline
-qa_chain = RetrievalQA(llm=llm, retriever=retriever)
-
-# Streamlit UI setup
-st.title("Multimodal RAG Chatbot")
-st.write("Ask anything about the loaded documents!")
-
-# User input
-user_query = st.text_input("Enter your question:")
-if user_query:
-    response = qa_chain.run(user_query)
-    st.write("**Response:**", response)
+    # Query the system
+    if query:
+        response = qa_chain.run(query)
+        st.write("Response:", response)
